@@ -12,6 +12,20 @@ MeshWeb enables decentralized web browsing over LoRa radio, allowing users to:
 
 Perfect for off-grid communication, disaster scenarios, or building local community networks.
 
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/screenshot1.jpg" width="200" alt="Node Discovery">
+  <img src="screenshots/screenshot2.jpg" width="200" alt="Companion Discovery">
+  <img src="screenshots/screenshot3.jpg" width="200" alt="Chat">
+</p>
+<p align="center">
+  <img src="screenshots/screenshot4.jpg" width="200" alt="Hosted Page">
+  <img src="screenshots/screenshot5.jpg" width="200" alt="Page Downloaded">
+</p>
+
+*Left to right: Node discovery, Companion discovery, Chat between companions, Hosted web page, Page download complete*
+
 ## Architecture
 
 ```
