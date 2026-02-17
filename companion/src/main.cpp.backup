@@ -1,0 +1,413 @@
+// MeshCore Companion Node - ESP32 Xiao with LoRa
+// Listens for PAGE_ANNOUNCE broadcasts and requests pages
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <RadioLib.h>
+#include <vector>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+
+// Web protocol
+#include "WebProtocol.h"
+
+// Web server
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+// LoRa radio pins (from platformio.ini build flags)
+// These are automatically set for XIAO ESP32-S3 + Wio-SX1262 Kit
+
+// Create radio object (adjust for your LoRa module type)
+// SX1262 for newer modules, SX1278 for older RFM95/96
+SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+// If you have SX1278/RFM95, uncomment this instead:
+// SX1278 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST);
+
+// Node identity
+uint8_t node_id[4];
+
+// LoRa state
+bool loraReady = false;
+volatile bool receivedFlag = false;
+
+// Discovered web nodes
+struct WebNode {
+  uint8_t node_id[4];
+  unsigned long last_seen;
+  char pages[WEB_MAX_PAGES_ANNOUNCE][WEB_MAX_PATH_LEN];
+  int page_count;
+};
+std::vector<WebNode> discoveredNodes;
+
+// Page request state
+bool requestPending = false;
+unsigned long requestTime = 0;
+const unsigned long REQUEST_TIMEOUT = 30000; // 30 seconds
+
+// Page reassembly
+String currentPage = "";
+int receivedChunks = 0;
+int totalChunksExpected = 0;
+bool receivingPage = false;
+
+// Interrupt handler for LoRa receive
+void IRAM_ATTR setFlag(void) {
+  receivedFlag = true;
+}
+
+void setupLoRa() {
+  Serial.println("\nInitializing LoRa...");
+  Serial.printf("Pin config: SCK=%d MISO=%d MOSI=%d CS=%d RST=%d DIO1=%d BUSY=%d\n",
+                LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS, LORA_RST, LORA_DIO1, LORA_BUSY);
+  
+  // Hardware reset for SX1262
+  pinMode(LORA_RST, OUTPUT);
+  digitalWrite(LORA_RST, LOW);
+  delay(100);
+  digitalWrite(LORA_RST, HIGH);
+  delay(100);
+  Serial.println("Reset pulse sent");
+  
+  // Initialize SPI with explicit settings
+  SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
+  SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
+  SPI.endTransaction();
+  Serial.println("SPI initialized");
+  
+  // Set antenna switch control (DIO2 as RF switch)
+  radio.setDio2AsRfSwitch(true);
+  
+  // Initialize radio (same config as web node)
+  int state = radio.begin(915.0,   // Frequency: 915.0 MHz (US ISM band)
+                         250.0,     // Bandwidth: 250 kHz
+                         11,        // Spreading Factor: 11
+                         5,         // Coding Rate: 4/5
+                         0x12,      // Sync Word (same as web node!)
+                         22,        // Output power: 22 dBm
+                         8,         // Preamble length
+                         1.8);      // TCXO voltage
+  
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println("✓ LoRa init success!");
+    Serial.println("✓ Frequency: 915.0 MHz (US ISM Band)");
+    Serial.println("✓ Listening for PAGE_ANNOUNCE broadcasts...");
+    loraReady = true;
+    
+    // Set interrupt for receive
+    radio.setDio1Action(setFlag);
+    
+    // Start listening
+    radio.startReceive();
+    
+  } else {
+    Serial.print("✗ LoRa init failed, code: ");
+    Serial.println(state);
+    Serial.println("\nTroubleshooting:");
+    Serial.println("- Check wiring (SCK, MISO, MOSI, CS, RST, DIO1, BUSY)");
+    Serial.println("- Verify pin definitions match your hardware");
+    Serial.println("- If using SX1278/RFM95, change radio type in code");
+    Serial.println("- If using SX1262, ensure TCXO voltage is correct");
+    loraReady = false;
+  }
+}
+
+// Find or add node to discovered list
+WebNode* findOrAddNode(uint8_t* id) {
+  // Search for existing
+  for (auto &node : discoveredNodes) {
+    if (memcmp(node.node_id, id, 4) == 0) {
+      return &node;
+    }
+  }
+  
+  // Add new
+  WebNode newNode;
+  memcpy(newNode.node_id, id, 4);
+  newNode.last_seen = millis();
+  newNode.page_count = 0;
+  discoveredNodes.push_back(newNode);
+  return &discoveredNodes.back();
+}
+
+// Display discovered nodes
+void printDiscoveredNodes() {
+  Serial.println("\n╔════════════════════════════════════════════╗");
+  Serial.println("║      Discovered Web Nodes                  ║");
+  Serial.println("╠════════════════════════════════════════════╣");
+  
+  if (discoveredNodes.empty()) {
+    Serial.println("║  (none)                                    ║");
+  } else {
+    for (size_t i = 0; i < discoveredNodes.size(); i++) {
+      auto &node = discoveredNodes[i];
+      Serial.printf("║ [%d] Node: %02X%02X%02X%02X                   ║\n", 
+                    i, node.node_id[0], node.node_id[1], 
+                    node.node_id[2], node.node_id[3]);
+      Serial.printf("║     Pages: %d                              ║\n", node.page_count);
+      for (int p = 0; p < node.page_count; p++) {
+        Serial.printf("║       - %-30s ║\n", node.pages[p]);
+      }
+      
+      unsigned long ago = (millis() - node.last_seen) / 1000;
+      Serial.printf("║     Last seen: %ld seconds ago            ║\n", ago);
+      Serial.println("╠════════════════════════════════════════════╣");
+    }
+  }
+  
+  Serial.println("╚════════════════════════════════════════════╝\n");
+}
+
+// Request a page from a node
+void requestPage(uint8_t* target_node, const char* page_path) {
+  if (!loraReady) return;
+  
+  Serial.printf("\n→ Requesting page: %s\n", page_path);
+  Serial.printf("  From node: %02X%02X%02X%02X\n",
+                target_node[0], target_node[1], 
+                target_node[2], target_node[3]);
+  
+  WebPageRequest req;
+  req.msg_type = WEB_MSG_PAGE_REQUEST;
+  req.request_id = random(256);  // Random request ID for tracking
+  memcpy(req.target_node, target_node, 4);
+  req.chunk_index = 0;  // Start from first chunk
+  strncpy(req.page_path, page_path, WEB_MAX_PATH_LEN);
+  
+  uint8_t buf[256];
+  int len = req.writeTo(buf);
+  
+  Serial.printf("  Request ID: %d\n", req.request_id);
+  
+  // Send request
+  int state = radio.transmit(buf, len);
+  
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println("✓ Request sent!");
+    requestPending = true;
+    requestTime = millis();
+  } else {
+    Serial.printf("✗ Request failed, code: %d\n", state);
+  }
+  
+  // Return to receive mode
+  radio.startReceive();
+}
+
+// Handle received LoRa packet
+void handleLoRaPacket() {
+  if (!loraReady) return;
+  
+  uint8_t buf[256];
+  int state = radio.readData(buf, 256);
+  
+  if (state == RADIOLIB_ERR_NONE) {
+    int len = radio.getPacketLength();
+    float rssi = radio.getRSSI();
+    float snr = radio.getSNR();
+    
+    uint8_t msg_type = WebProtocol::getMessageType(buf);
+    
+    switch (msg_type) {
+      case WEB_MSG_PAGE_ANNOUNCE: {
+        WebPageAnnounce announce;
+        if (announce.readFrom(buf, len)) {
+          Serial.println("\n╔════════════════════════════════════════════╗");
+          Serial.println("║  📡 PAGE_ANNOUNCE Received                 ║");
+          Serial.println("╠════════════════════════════════════════════╣");
+          Serial.printf("║  Node ID: %02X%02X%02X%02X                      ║\n",
+                       announce.node_id[0], announce.node_id[1],
+                       announce.node_id[2], announce.node_id[3]);
+          Serial.printf("║  RSSI: %.1f dBm  SNR: %.1f dB            ║\n", rssi, snr);
+          Serial.printf("║  Pages: %d                                 ║\n", announce.page_count);
+          
+          // Update discovered nodes
+          WebNode* node = findOrAddNode(announce.node_id);
+          node->last_seen = millis();
+          node->page_count = announce.page_count;
+          for (int i = 0; i < announce.page_count; i++) {
+            strncpy(node->pages[i], announce.pages[i], WEB_MAX_PATH_LEN);
+            Serial.printf("║    %d. %-34s ║\n", i+1, announce.pages[i]);
+          }
+          
+          Serial.println("╚════════════════════════════════════════════╝");
+        }
+        break;
+      }
+      
+      case WEB_MSG_PAGE_DATA: {
+        WebPageData data;
+        if (data.readFrom(buf, len)) {
+          Serial.printf("📄 Chunk %d/%d (%d bytes) RSSI: %.1f dBm\n", 
+                       data.chunk_index + 1, data.total_chunks, data.data_len, rssi);
+          
+          // Start new page reassembly
+          if (data.chunk_index == 0) {
+            currentPage = "";
+            receivedChunks = 0;
+            totalChunksExpected = data.total_chunks;
+            receivingPage = true;
+            
+            // Send start marker to Bluetooth
+            SerialBT.println("PAGE_START");
+          }
+          
+          // Append chunk data
+          if (receivingPage) {
+            for (int i = 0; i < data.data_len; i++) {
+              currentPage += (char)data.data[i];
+            }
+            receivedChunks++;
+            
+            // Send progress to Bluetooth
+            SerialBT.printf("PROGRESS:%d/%d\n", receivedChunks, totalChunksExpected);
+            
+            // Check if complete
+            if (receivedChunks >= totalChunksExpected) {
+              Serial.println("✓ Page complete! Sending to Bluetooth...");
+              
+              // Send complete page via Bluetooth
+              SerialBT.println("PAGE_DATA");
+              SerialBT.println(currentPage);
+              SerialBT.println("PAGE_END");
+              
+              receivingPage = false;
+              requestPending = false;
+            }
+          }
+        }
+        break;
+      }
+      
+      default:
+        Serial.printf("⚠ Unknown message type: 0x%02X\n", msg_type);
+    }
+    
+  } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+    Serial.println("⚠ CRC error - corrupted packet");
+  }
+  
+  // Return to receive mode
+  radio.startReceive();
+}
+
+// Process command from either Serial or Bluetooth
+void processCommand(String cmd, Stream* output) {
+  cmd.trim();
+  cmd.replace("\r", "");
+  
+  // Strip leading control characters
+  while (cmd.length() > 0 && cmd[0] < 0x20) {
+    cmd = cmd.substring(1);
+  }
+  
+  if (cmd.length() == 0) return;
+  
+  output->printf("[CMD] Received: '%s' (len=%d)\n", cmd.c_str(), cmd.length());
+  
+  const char* cmdStr = cmd.c_str();
+  
+  if (strcmp(cmdStr, "list") == 0) {
+    // Send node list
+    output->println("NODES_START");
+    for (size_t i = 0; i < discoveredNodes.size(); i++) {
+      auto &node = discoveredNodes[i];
+      output->printf("NODE:%d:%02X%02X%02X%02X:%d\n", 
+                    i, node.node_id[0], node.node_id[1], 
+                    node.node_id[2], node.node_id[3], node.page_count);
+      for (int p = 0; p < node.page_count; p++) {
+        output->printf("PAGE:%s\n", node.pages[p]);
+      }
+    }
+    output->println("NODES_END");
+    
+  } else if (strncmp(cmdStr, "req ", 4) == 0) {
+    int firstSpace = cmd.indexOf(' ');
+    int secondSpace = cmd.indexOf(' ', firstSpace + 1);
+    
+    if (secondSpace > 0) {
+      int nodeIndex = cmd.substring(firstSpace + 1, secondSpace).toInt();
+      String pagePath = cmd.substring(secondSpace + 1);
+      
+      if (nodeIndex >= 0 && nodeIndex < (int)discoveredNodes.size()) {
+        requestPage(discoveredNodes[nodeIndex].node_id, pagePath.c_str());
+      } else {
+        output->println("ERROR:Invalid node index");
+      }
+    } else {
+      output->println("ERROR:Usage: req <node_index> <page>");
+    }
+    
+  } else if (strcmp(cmdStr, "help") == 0) {
+    output->println("HELP:list - Show discovered nodes");
+    output->println("HELP:req <node_index> <page> - Request a page");
+    
+  } else if (cmd.length() > 0) {
+    output->println("ERROR:Unknown command. Type 'help' for commands.");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  
+  Serial.println("\n\n");
+  Serial.println("╔═══════════════════════════════════════════════╗");
+  Serial.println("║   MeshCore Companion Node - ESP32 Xiao       ║");
+  Serial.println("║   Text Internet Over LoRa Mesh               ║");
+  Serial.println("╚═══════════════════════════════════════════════╝");
+  
+  // Generate random node ID
+  for (int i = 0; i < 4; i++) {
+    node_id[i] = random(256);
+  }
+  
+  Serial.print("\nNode ID: ");
+  for (int i = 0; i < 4; i++) {
+    Serial.printf("%02X", node_id[i]);
+  }
+  Serial.println();
+  
+  // Initialize Bluetooth
+  SerialBT.begin("MeshWeb Companion");
+  Serial.println("Bluetooth started: 'MeshWeb Companion'");
+  
+  // Initialize LoRa
+  setupLoRa();
+  
+  if (loraReady) {
+    Serial.println("\n✓ Setup complete - listening for web nodes...");
+    Serial.println("\nSerial/Bluetooth Commands:");
+    Serial.println("  'list' - Show discovered nodes");
+    Serial.println("  'req <node_index> <page>' - Request a page");
+    Serial.println("    Example: req 0 /index.html\n");
+  }
+}
+
+void loop() {
+  // Check for received LoRa packets
+  if (receivedFlag) {
+    receivedFlag = false;
+    handleLoRaPacket();
+  }
+  
+  // Check for request timeout
+  if (requestPending && (millis() - requestTime > REQUEST_TIMEOUT)) {
+    Serial.println("⚠ Request timeout - no response received");
+    requestPending = false;
+  }
+  
+  // Check for serial commands
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    processCommand(cmd, &Serial);
+  }
+  
+  // Check for Bluetooth commands
+  if (SerialBT.available()) {
+    String cmd = SerialBT.readStringUntil('\n');
+    processCommand(cmd, &SerialBT);
+  }
+  
+  delay(10);
+}

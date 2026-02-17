@@ -1,0 +1,245 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+    min-height: 100vh;
+    color: #333;
+}
+
+.container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 20px;
+}
+
+/* Logo Section */
+.logo-section {
+    text-align: center;
+    margin-bottom: 40px;
+}
+
+.logo {
+    font-size: 3.5rem;
+    font-weight: 300;
+    color: white;
+    margin-bottom: 10px;
+    letter-spacing: -1px;
+}
+
+.tagline {
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 1.1rem;
+    font-weight: 300;
+}
+
+/* Search Section */
+.search-section {
+    margin-bottom: 30px;
+}
+
+.search-box {
+    display: flex;
+    max-width: 700px;
+    margin: 0 auto;
+    background: white;
+    border-radius: 50px;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+#search-input {
+    flex: 1;
+    border: none;
+    padding: 18px 30px;
+    font-size: 1rem;
+    outline: none;
+}
+
+#search-btn {
+    background: #4CAF50;
+    border: none;
+    color: white;
+    padding: 18px 40px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+#search-btn:hover {
+    background: #45a049;
+}
+
+/* Status Bar */
+.status-bar {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+    margin-bottom: 40px;
+    flex-wrap: wrap;
+}
+
+.status-item {
+    color: rgba(255, 255, 255, 0.95);
+    font-size: 0.95rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #4CAF50;
+    display: inline-block;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Results Container */
+#results-container {
+    background: white;
+    border-radius: 12px;
+    padding: 30px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+    min-height: 400px;
+}
+
+#popular-pages h2 {
+    color: #333;
+    margin-bottom: 25px;
+    font-size: 1.5rem;
+    font-weight: 500;
+}
+
+/* Page Cards */
+#page-list {
+    display: grid;
+    gap: 20px;
+}
+
+.page-card {
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 20px;
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.page-card:hover {
+    border-color: #4CAF50;
+    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.1);
+    transform: translateY(-2px);
+}
+
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    margin-bottom: 12px;
+    gap: 15px;
+}
+
+.page-header h3 {
+    color: #1976D2;
+    font-size: 1.3rem;
+    font-weight: 500;
+    margin: 0;
+}
+
+.node-id {
+    font-size: 0.8rem;
+    color: #666;
+    background: #f5f5f5;
+    padding: 4px 10px;
+    border-radius: 12px;
+    white-space: nowrap;
+    font-family: 'Courier New', monospace;
+}
+
+.page-description {
+    color: #555;
+    line-height: 1.6;
+    margin-bottom: 12px;
+}
+
+.page-meta {
+    display: flex;
+    gap: 20px;
+    font-size: 0.85rem;
+    color: #777;
+}
+
+/* Footer */
+.footer {
+    margin-top: 40px;
+    text-align: center;
+}
+
+.footer-links {
+    display: flex;
+    justify-content: center;
+    gap: 25px;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+}
+
+.footer-links a {
+    color: rgba(255, 255, 255, 0.9);
+    text-decoration: none;
+    font-size: 0.95rem;
+    transition: color 0.3s;
+}
+
+.footer-links a:hover {
+    color: white;
+    text-decoration: underline;
+}
+
+.node-info {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.9rem;
+}
+
+#your-node-id {
+    font-family: 'Courier New', monospace;
+    color: rgba(255, 255, 255, 0.95);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .logo {
+        font-size: 2.5rem;
+    }
+    
+    .container {
+        padding: 30px 15px;
+    }
+    
+    .search-box {
+        flex-direction: column;
+        border-radius: 12px;
+    }
+    
+    #search-btn {
+        border-radius: 0;
+    }
+    
+    .status-bar {
+        gap: 15px;
+    }
+    
+    #results-container {
+        padding: 20px;
+    }
+}

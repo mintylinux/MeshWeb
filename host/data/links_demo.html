@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshWeb Links Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #0a0a0a;
+            color: #fff;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #0077ff;
+            border-bottom: 2px solid #0077ff;
+            padding-bottom: 10px;
+        }
+        .link-box {
+            background: #1a1a1a;
+            border: 2px solid #333;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .link-box h3 {
+            color: #0077ff;
+            margin-top: 0;
+        }
+        a {
+            color: #0099ff;
+            text-decoration: none;
+            padding: 10px 15px;
+            background: #1a3a5a;
+            border-radius: 4px;
+            display: inline-block;
+            margin: 5px 0;
+            transition: background 0.3s;
+        }
+        a:hover {
+            background: #2a5a8a;
+        }
+        .info {
+            background: #2a2a00;
+            border-left: 4px solid #ffaa00;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        code {
+            background: #2a2a2a;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #0099ff;
+        }
+    </style>
+</head>
+<body>
+    <h1>🌐 MeshWeb Inter-Node Links</h1>
+    
+    <div class="info">
+        <strong>ℹ️ How it works:</strong> Click any link below to navigate to a page on another MeshWeb node. 
+        The companion will automatically request the page over LoRa and display it!
+    </div>
+
+    <div class="link-box">
+        <h3>Example Mesh Links</h3>
+        <p>These links use the <code>mesh://</code> protocol to link to other nodes:</p>
+        
+        <!-- Links to Wild Tiger node (9e75cd90) -->
+        <p>
+            <a href="mesh://9e75cd90/index.html">📄 Home Page on Wild Tiger</a><br>
+            <small>Links to /index.html on Wild Tiger node</small>
+        </p>
+        
+        <p>
+            <a href="mesh://9e75cd90/about.html">ℹ️ About Page on Wild Tiger</a><br>
+            <small>Links to /about.html on Wild Tiger node</small>
+        </p>
+        
+        <p>
+            <a href="mesh://9e75cd90/links_demo_2.html">🔗 This Page on Wild Tiger</a><br>
+            <small>Creates a link between the same page on different nodes!</small>
+        </p>
+    </div>
+
+    <div class="link-box">
+        <h3>🔧 Creating Your Own Mesh Links</h3>
+        <p>To create a link to another MeshWeb node, use this format:</p>
+        <code>&lt;a href="mesh://[NODE_ID]/[PAGE_PATH]"&gt;Link Text&lt;/a&gt;</code>
+        
+        <p style="margin-top: 15px;"><strong>Where:</strong></p>
+        <ul>
+            <li><code>[NODE_ID]</code> = The 8-character hex ID of the target node (e.g., "ff1a2b3c")</li>
+            <li><code>[PAGE_PATH]</code> = The path to the page (e.g., "index.html" or "pages/about.html")</li>
+        </ul>
+        
+        <p><strong>Example:</strong></p>
+        <code>&lt;a href="mesh://ff1a2b3c/welcome.html"&gt;Visit Node ff1a2b3c&lt;/a&gt;</code>
+    </div>
+
+    <div class="link-box">
+        <h3>📍 Finding Node IDs</h3>
+        <p>To find the node ID of a MeshWeb host:</p>
+        <ol>
+            <li>Connect your companion to the mesh network</li>
+            <li>Check the serial monitor of the host node (shows at boot)</li>
+            <li>Or look at the node list on the companion web interface</li>
+        </ol>
+    </div>
+
+    <div class="info">
+        <strong>💡 Pro Tip:</strong> You can create entire networks of linked pages across multiple MeshWeb nodes, 
+        building a true decentralized web over LoRa!
+    </div>
+
+    <hr style="border-color: #333; margin: 30px 0;">
+    <p style="text-align: center; color: #666;">
+        <a href="/index.html">← Back to Home</a>
+    </p>
+</body>
+</html>

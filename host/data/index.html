@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeshWeb Search</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Logo and Title -->
+        <div class="logo-section">
+            <h1 class="logo">🔍 MeshWeb Search</h1>
+            <p class="tagline">Discover the Decentralized Web</p>
+        </div>
+
+        <!-- Search Bar -->
+        <div class="search-section">
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="Search the mesh network..." autofocus>
+                <button id="search-btn">Search</button>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="status-bar">
+            <span class="status-item">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">Online</span>
+            </span>
+            <span class="status-item">
+                <span id="node-count">1</span> nodes online
+            </span>
+            <span class="status-item">
+                <span id="page-count">6</span> pages indexed
+            </span>
+        </div>
+
+        <!-- Search Results -->
+        <div id="results-container">
+            <!-- Default state: Popular pages -->
+            <div id="popular-pages">
+                <h2>📡 Recently Discovered Pages</h2>
+                <div id="page-list">
+                    <div class="page-card" onclick="alert('Page would open here. In full version, this would request content via mesh network.')">
+                        <div class="page-header">
+                            <h3>Welcome to MeshWeb</h3>
+                            <span class="node-id">Node: ff1a2b3c</span>
+                        </div>
+                        <p class="page-description">Learn about the decentralized mesh network and how it works.</p>
+                        <div class="page-meta">
+                            <span>📍 1 hop away</span>
+                            <span>🕐 2 min ago</span>
+                        </div>
+                    </div>
+
+                    <div class="page-card" onclick="alert('Page would open here.')">
+                        <div class="page-header">
+                            <h3>Mesh Network News</h3>
+                            <span class="node-id">Node: 8d4e5f6g</span>
+                        </div>
+                        <p class="page-description">Latest updates and announcements from the mesh community.</p>
+                        <div class="page-meta">
+                            <span>📍 3 hops away</span>
+                            <span>🕐 15 min ago</span>
+                        </div>
+                    </div>
+
+                    <div class="page-card" onclick="alert('Page would open here.')">
+                        <div class="page-header">
+                            <h3>Off-Grid Chat</h3>
+                            <span class="node-id">Node: 7c8d9e0f</span>
+                        </div>
+                        <p class="page-description">Real-time messaging board for the local mesh network.</p>
+                        <div class="page-meta">
+                            <span>📍 2 hops away</span>
+                            <span>🕐 5 min ago</span>
+                        </div>
+                    </div>
+
+                    <div class="page-card" onclick="alert('Page would open here.')">
+                        <div class="page-header">
+                            <h3>DIY Projects</h3>
+                            <span class="node-id">Node: 1a2b3c4d</span>
+                        </div>
+                        <p class="page-description">Share your maker projects, 3D prints, and tech builds.</p>
+                        <div class="page-meta">
+                            <span>📍 4 hops away</span>
+                            <span>🕐 1 hour ago</span>
+                        </div>
+                    </div>
+
+                    <div class="page-card" onclick="alert('Page would open here.')">
+                        <div class="page-header">
+                            <h3>Local Weather Station</h3>
+                            <span class="node-id">Node: 5e6f7g8h</span>
+                        </div>
+                        <p class="page-description">Real-time weather data from nearby sensors on the mesh.</p>
+                        <div class="page-meta">
+                            <span>📍 1 hop away</span>
+                            <span>🕐 Just now</span>
+                        </div>
+                    </div>
+
+                    <div class="page-card" onclick="alert('Page would open here.')">
+                        <div class="page-header">
+                            <h3>Emergency Notices</h3>
+                            <span class="node-id">Node: 9f0a1b2c</span>
+                        </div>
+                        <p class="page-description">Important alerts and emergency information for the local area.</p>
+                        <div class="page-meta">
+                            <span>📍 2 hops away</span>
+                            <span>🕐 30 min ago</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer Info -->
+        <div class="footer">
+            <div class="footer-links">
+                <a href="#" onclick="showAbout(); return false;">About MeshWeb</a>
+                <a href="#" onclick="showHostInfo(); return false;">Host a Page</a>
+                <a href="#" onclick="alert('Network map would show mesh topology'); return false;">Network Map</a>
+            </div>
+            <p class="node-info">Your Node ID: <span id="your-node-id">10:51:db:51:04:dc</span></p>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

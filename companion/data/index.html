@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MeshWeb Browser</title>
+    <meta name='viewport' content='width=device-width,initial-scale=1'>
+    <style>
+        body{font-family:Arial;margin:20px;background:#1a1a1a;color:#fff}
+        button{background:#007bff;color:#fff;border:none;padding:10px 20px;margin:5px;cursor:pointer;border-radius:5px}
+        button:hover{background:#0056b3}
+        #nodes{margin:20px 0}
+        #content{background:#2a2a2a;padding:20px;border-radius:5px;overflow:auto}
+        .progress-bar{width:100%;height:30px;background:#333;border-radius:5px;overflow:hidden;margin:10px 0}
+        .progress-fill{height:100%;background:#007bff;transition:width 0.3s;text-align:center;line-height:30px;color:#fff}
+    </style>
+</head>
+<body>
+    <h1>📡 MeshWeb Browser</h1>
+    <button onclick='listNodes()'>Refresh Nodes</button>
+    <div id='nodes'></div>
+    <h2>Page Content:</h2>
+    <div id='progress'></div>
+    <div id='content'></div>
+    
+    <script>
+        var ws=new WebSocket('ws://'+location.host+'/ws');
+        
+        ws.onmessage=function(e){
+            console.log('WS Received:',e.data.substring(0,100));
+            try{
+                var d=JSON.parse(e.data);
+                console.log('Parsed type:',d.type);
+                
+                if(d.type=='nodes'){
+                    var h='<h2>Discovered Nodes:</h2>';
+                    d.nodes.forEach(function(n){
+                        h+='<div><b>Node '+n.id+'</b><br>';
+                        n.pages.forEach(function(p){
+                            h+='<button onclick=reqPage('+n.index+','+JSON.stringify(p)+')>'+p+'</button>';
+                        });
+                        h+='</div><br>';
+                    });
+                    document.getElementById('nodes').innerHTML=h;
+                }
+                else if(d.type=='page_start'){
+                    console.log('Page start');
+                    document.getElementById('progress').innerHTML='<div class="progress-bar"><div class="progress-fill" style="width:0%">Starting...</div></div>';
+                    document.getElementById('content').innerHTML='';
+                }
+                else if(d.type=='progress'){
+                    console.log('Progress:',d.received,'/',d.total);
+                    var pct=Math.round((d.received/d.total)*100);
+                    document.getElementById('progress').innerHTML='<div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%">'+d.received+'/'+d.total+' ('+pct+'%)</div></div>';
+                }
+                else if(d.type=='page_data'){
+                    console.log('Page data:',d.html.length,'bytes');
+                    document.getElementById('progress').innerHTML='';
+                    document.getElementById('content').innerHTML=d.html;
+                }
+            }catch(err){
+                console.error('Parse error:',err,e.data.substring(0,200));
+            }
+        };
+        
+        ws.onerror=function(e){console.error('WS error:',e)};
+        ws.onclose=function(){console.log('WS closed')};
+        
+        function listNodes(){
+            console.log('Sending list');
+            ws.send('list');
+        }
+        
+        function reqPage(idx,page){
+            console.log('Requesting:',idx,page);
+            ws.send('req '+idx+' '+page);
+        }
+        
+        window.onload=function(){
+            setTimeout(listNodes,500);
+        };
+    </script>
+</body>
+</html>
