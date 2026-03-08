@@ -340,12 +340,16 @@ void setupLoRa() {
 void sendPageData(uint8_t request_id, const char* page_path) {
   if (!loraReady) return;
   
-  Serial.printf("\n>>> Sending page: %s\n", page_path);
+  // Map / to /index.html
+  String path = String(page_path);
+  if (path == "/") path = "/index.html";
+  
+  Serial.printf("\n>>> Sending page: %s (requested: %s)\n", path.c_str(), page_path);
   
   // Stay in SF9 mode - no mode switching for reliability
   
   // Open file
-  File file = SPIFFS.open(page_path, "r");
+  File file = SPIFFS.open(path.c_str(), "r");
   if (!file) {
     Serial.println("✗ File not found!");
     switchToLoRa();  // Switch back even on error
@@ -386,8 +390,8 @@ void sendPageData(uint8_t request_id, const char* page_path) {
       break;
     }
     
-    // Delay to allow receiver to process and return to RX mode
-    delay(100);
+    // Delay to allow receiver to process, send BLE events, and return to RX mode
+    delay(200);
   }
   
   file.close();

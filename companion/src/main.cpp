@@ -1,19 +1,239 @@
 // MeshWeb Companion - ESP32 Xiao with LoRa
 // Listens for PAGE_ANNOUNCE broadcasts and requests pages
+// Supports both WiFi AP mode and USB-only mode (build with -DUSB_ONLY)
 
 #include <Arduino.h>
 #include <SPI.h>
 #include <RadioLib.h>
 #include <vector>
+
+#ifndef USB_ONLY
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
+#endif
+
+#ifdef ENABLE_BLE
+#include <NimBLEDevice.h>
+#endif
 
 // Web protocol
 #include "WebProtocol.h"
 
-// Web server
+// Base64 encoding table for getpage command
+static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+String base64_encode(const uint8_t* data, size_t len) {
+  String out;
+  out.reserve((len + 2) / 3 * 4);
+  for (size_t i = 0; i < len; i += 3) {
+    uint32_t n = ((uint32_t)data[i]) << 16;
+    if (i + 1 < len) n |= ((uint32_t)data[i + 1]) << 8;
+    if (i + 2 < len) n |= data[i + 2];
+    out += b64_table[(n >> 18) & 0x3F];
+    out += b64_table[(n >> 12) & 0x3F];
+    out += (i + 1 < len) ? b64_table[(n >> 6) & 0x3F] : '=';
+    out += (i + 2 < len) ? b64_table[n & 0x3F] : '=';
+  }
+  return out;
+}
+
+#ifndef USB_ONLY
+// Web server (WiFi mode only)
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+#endif
+
+// ============================================================
+// BLE UART Transport (Nordic UART Service)
+// ============================================================
+#ifdef ENABLE_BLE
+
+// Nordic UART Service UUIDs
+#define NUS_SERVICE_UUID        "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_RX_CHARACTERISTIC   "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  // Client writes here
+#define NUS_TX_CHARACTERISTIC   "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  // Device notifies here
+
+NimBLEServer* pBLEServer = nullptr;
+NimBLECharacteristic* pTxCharacteristic = nullptr;
+bool bleClientConnected = false;
+
+// Forward declarations
+void processCommand(String cmd, Stream* output);
+
+// Note: NimBLE defines macros like '#define BLEServerCallbacks NimBLEServerCallbacks'
+// so we use MeshWeb-prefixed names to avoid redefinition collisions.
+class MeshWebServerCB : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pServer) override {
+    bleClientConnected = true;
+    Serial.println("BLE client connected");
+    NimBLEDevice::startAdvertising();
+  }
+  void onDisconnect(NimBLEServer* pServer) override {
+    bleClientConnected = false;
+    Serial.println("BLE client disconnected");
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+// Stream wrapper that sends processCommand output back over BLE TX
+class BLEStream : public Stream {
+  String _lineBuf;
+public:
+  // Print interface - this is what processCommand uses
+  size_t write(uint8_t c) override {
+    _lineBuf += (char)c;
+    if (c == '\n') {
+      _flush();
+    }
+    return 1;
+  }
+  size_t write(const uint8_t* buf, size_t size) override {
+    for (size_t i = 0; i < size; i++) {
+      _lineBuf += (char)buf[i];
+      if (buf[i] == '\n') {
+        _flush();
+      }
+    }
+    return size;
+  }
+  void _flush() {
+    if (_lineBuf.length() == 0 || !bleClientConnected || !pTxCharacteristic) {
+      _lineBuf = "";
+      return;
+    }
+    const uint8_t* data = (const uint8_t*)_lineBuf.c_str();
+    size_t len = _lineBuf.length();
+    size_t mtu = NimBLEDevice::getMTU() - 3;
+    if (mtu < 20) mtu = 20;
+    for (size_t offset = 0; offset < len; offset += mtu) {
+      size_t chunkLen = len - offset;
+      if (chunkLen > mtu) chunkLen = mtu;
+      pTxCharacteristic->setValue(data + offset, chunkLen);
+      pTxCharacteristic->notify();
+      if (offset + chunkLen < len) delay(5);
+    }
+    // Delay after each line to prevent notification queue overflow
+    delay(15);
+    // Also echo to Serial for debugging
+    Serial.print("[BLE>] ");
+    Serial.print(_lineBuf);
+    _lineBuf = "";
+  }
+  // Stream interface (unused - we only use Print side)
+  int available() override { return 0; }
+  int read() override { return -1; }
+  int peek() override { return -1; }
+};
+
+BLEStream bleOutputStream;
+
+// BLE command queue - process in loop() instead of blocking NimBLE task
+String pendingBLECommand = "";
+// Auto-send page data over BLE after page_complete
+bool bleAutoSendPage = false;
+
+class MeshWebRxCB : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* pCharacteristic) override {
+    std::string value = pCharacteristic->getValue();
+    if (value.length() > 0) {
+      String cmd = String(value.c_str());
+      cmd.trim();
+      Serial.printf("[BLE] Command queued: %s\n", cmd.c_str());
+      pendingBLECommand = cmd;  // Queue for processing in loop()
+    }
+  }
+};
+
+// Forward declare - companionName is defined later with other globals
+extern char companionName[32];
+
+void setupBLE() {
+  String bleName = "MeshWeb-" + String(companionName);
+  Serial.printf("[BLE] Initializing as '%s'...\n", bleName.c_str());
+  Serial.printf("[BLE] Free heap before init: %d\n", ESP.getFreeHeap());
+  
+  NimBLEDevice::init(bleName.c_str());
+  
+  if (!NimBLEDevice::getInitialized()) {
+    Serial.println("[BLE] ERROR: NimBLE init FAILED!");
+    return;
+  }
+  Serial.println("[BLE] NimBLE initialized OK");
+  
+  NimBLEDevice::setMTU(512);
+  
+  pBLEServer = NimBLEDevice::createServer();
+  if (!pBLEServer) {
+    Serial.println("[BLE] ERROR: createServer() returned NULL!");
+    return;
+  }
+  pBLEServer->setCallbacks(new MeshWebServerCB());
+  Serial.println("[BLE] Server created");
+  
+  NimBLEService* pService = pBLEServer->createService(NUS_SERVICE_UUID);
+  if (!pService) {
+    Serial.println("[BLE] ERROR: createService() returned NULL!");
+    return;
+  }
+  
+  pTxCharacteristic = pService->createCharacteristic(
+    NUS_TX_CHARACTERISTIC,
+    NIMBLE_PROPERTY::NOTIFY
+  );
+  
+  NimBLECharacteristic* pRxCharacteristic = pService->createCharacteristic(
+    NUS_RX_CHARACTERISTIC,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+  );
+  pRxCharacteristic->setCallbacks(new MeshWebRxCB());
+  
+  pService->start();
+  Serial.println("[BLE] NUS service started");
+  
+  NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(NUS_SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->start();
+  
+  Serial.printf("[BLE] Free heap after init: %d\n", ESP.getFreeHeap());
+  Serial.printf("[BLE] Advertising started: %s\n", bleName.c_str());
+  Serial.println("BLE UART started: " + bleName);
+}
+
+// Send JSON event over BLE (chunked to fit MTU)
+void bleSendEvent(const String& json) {
+  if (!bleClientConnected || !pTxCharacteristic) return;
+  
+  // Add EVT: prefix for consistency with serial protocol
+  String msg = "EVT:" + json + "\n";
+  const uint8_t* data = (const uint8_t*)msg.c_str();
+  size_t len = msg.length();
+  
+  // Get negotiated MTU minus 3 bytes ATT overhead
+  size_t mtu = NimBLEDevice::getMTU() - 3;
+  if (mtu < 20) mtu = 20;
+  
+  for (size_t offset = 0; offset < len; offset += mtu) {
+    size_t chunkLen = len - offset;
+    if (chunkLen > mtu) chunkLen = mtu;
+    pTxCharacteristic->setValue(data + offset, chunkLen);
+    pTxCharacteristic->notify();
+    if (offset + chunkLen < len) delay(5);  // Small delay between chunks
+  }
+}
+
+#endif  // ENABLE_BLE
+
+// Send a JSON event to all connected clients (WebSocket + BLE + Serial)
+void sendEvent(const String& json) {
+#ifndef USB_ONLY
+  ws.textAll(json);
+#endif
+#ifdef ENABLE_BLE
+  bleSendEvent(json);
+#endif
+  Serial.println("EVT:" + json);
+}
 
 // LoRa radio pins (from platformio.ini build flags)
 // These are automatically set for XIAO ESP32-S3 + Wio-SX1262 Kit
@@ -91,9 +311,12 @@ String currentPage = "";
 int receivedChunks = 0;
 int totalChunksExpected = 0;
 bool receivingPage = false;
+unsigned long lastChunkTime = 0;  // For stall detection
 
-// Forward declarations
+// Forward declarations (also declared above BLE callbacks when BLE enabled)
+#ifndef ENABLE_BLE
 void processCommand(String cmd, Stream* output);
+#endif
 
 // Interrupt handler for LoRa receive
 void IRAM_ATTR setFlag(void) {
@@ -326,29 +549,38 @@ void sendCompanionMessage(uint8_t* to_id, const char* message) {
   
   int state = radio.transmit(buf, len);
   if (state == RADIOLIB_ERR_NONE) {
-    Serial.printf("💬 Message sent: %s\n", message);
-    
-    // Add to our own chat history
-    ChatMessage chatMsg;
-    memcpy(chatMsg.from_id, node_id, 4);
-    strncpy(chatMsg.from_name, companionName, 31);
-    chatMsg.from_name[31] = '\0';
-    strncpy(chatMsg.message, message, WEB_MAX_MESSAGE_LEN - 1);
-    chatMsg.message[WEB_MAX_MESSAGE_LEN - 1] = '\0';
-    chatMsg.timestamp = millis();
-    chatMsg.is_broadcast = (to_id == nullptr);
-    
-    chatHistory.push_back(chatMsg);
-    if (chatHistory.size() > MAX_CHAT_HISTORY) {
-      chatHistory.erase(chatHistory.begin());
-    }
-    
-    // Notify browser
-    String json = "{\"type\":\"chat\",\"from\":\"" + String(companionName) + "\",\"msg\":\"" + String(message) + "\",\"self\":true}";
-    ws.textAll(json);
+    Serial.printf("💬 Message sent over LoRa: %s\n", message);
+  } else {
+    Serial.printf("⚠ LoRa send failed (code %d), message shown locally only: %s\n", state, message);
   }
   
   radio.startReceive();
+  
+  // Always add to chat history and notify browser (even if LoRa failed)
+  // so the user sees their own message in the UI
+  ChatMessage chatMsg;
+  memcpy(chatMsg.from_id, node_id, 4);
+  strncpy(chatMsg.from_name, companionName, 31);
+  chatMsg.from_name[31] = '\0';
+  strncpy(chatMsg.message, message, WEB_MAX_MESSAGE_LEN - 1);
+  chatMsg.message[WEB_MAX_MESSAGE_LEN - 1] = '\0';
+  chatMsg.timestamp = millis();
+  chatMsg.is_broadcast = (to_id == nullptr);
+  
+  chatHistory.push_back(chatMsg);
+  if (chatHistory.size() > MAX_CHAT_HISTORY) {
+    chatHistory.erase(chatHistory.begin());
+  }
+  
+  char fromIdStr[16];
+  sprintf(fromIdStr, "%02x%02x%02x%02x", node_id[0], node_id[1], node_id[2], node_id[3]);
+  String json = "{\"type\":\"chat\",\"from\":\"" + String(companionName) + "\",\"from_id\":\"" + String(fromIdStr) + "\",\"msg\":\"" + String(message) + "\",\"self\":true,\"broadcast\":" + String(to_id == nullptr ? "true" : "false") + "}";
+  if (to_id) {
+    char toIdStr[16];
+    sprintf(toIdStr, "%02x%02x%02x%02x", to_id[0], to_id[1], to_id[2], to_id[3]);
+    json = json.substring(0, json.length() - 1) + ",\"to_id\":\"" + String(toIdStr) + "\"}";
+  }
+  sendEvent(json);
 }
 
 // Request a page from a node
@@ -406,12 +638,24 @@ void handleLoRaPacket() {
   uint8_t buf[256];
   int state = radio.readData(buf, 256);
   
+  // Re-arm receiver IMMEDIATELY so we don't miss the next packet
+  // (data is already copied into buf, safe to start listening again)
+  radio.startReceive();
+  
   if (state == RADIOLIB_ERR_NONE) {
     int len = radio.getPacketLength();
     float rssi = radio.getRSSI();
     float snr = radio.getSNR();
     
     uint8_t msg_type = WebProtocol::getMessageType(buf);
+    
+    // During active page transfer, skip non-essential messages to avoid delays
+    // But always allow companion messages through
+    if (receivingPage && msg_type != WEB_MSG_PAGE_DATA && msg_type != WEB_MSG_COMPANION_MESSAGE) {
+      Serial.printf("⏭ Skipping msg 0x%02X during page transfer (%d/%d)\n",
+                    msg_type, receivedChunks, totalChunksExpected);
+      return;
+    }
     
     switch (msg_type) {
       case WEB_MSG_PAGE_ANNOUNCE: {
@@ -445,8 +689,8 @@ void handleLoRaPacket() {
           
           Serial.println("╚════════════════════════════════════════════╝");
           
-          // Auto-send updated node list to browser if WebSocket clients connected
-          if (ws.count() > 0) {
+          // Send updated node list to all clients
+          {
             String nodesJson = "{\"type\":\"nodes\",\"nodes\":[";
             for (size_t i = 0; i < discoveredNodes.size(); i++) {
               auto &n = discoveredNodes[i];
@@ -462,8 +706,8 @@ void handleLoRaPacket() {
               nodesJson += "]}";
             }
             nodesJson += "]}";
-            ws.textAll(nodesJson);
-            Serial.println("  → Node list sent to browser");
+            sendEvent(nodesJson);
+            Serial.println("  → Node list sent to clients");
           }
         }
         break;
@@ -472,9 +716,7 @@ void handleLoRaPacket() {
       case WEB_MSG_PAGE_REQUEST: {
         // Ignore - this is likely our own transmission being echoed
         Serial.println("⚠ Ignoring PAGE_REQUEST (our own transmission)");
-        // Properly clear and restart receiver
-        radio.startReceive();
-        return;  // Early return to avoid double startReceive() at end
+        return;
       }
       
       case WEB_MSG_PAGE_DATA: {
@@ -488,30 +730,34 @@ void handleLoRaPacket() {
           
           Serial.printf("📄 Chunk %d/%d (%d bytes) RSSI: %.1f dBm\n", 
                        data.chunk_index + 1, data.total_chunks, data.data_len, rssi);
+          lastChunkTime = millis();
           
           // Start new page reassembly
           if (data.chunk_index == 0) {
             currentPage = "";
+            // Pre-allocate to avoid repeated reallocation
+            currentPage.reserve(data.total_chunks * WEB_MAX_CHUNK_SIZE);
             receivedChunks = 0;
             totalChunksExpected = data.total_chunks;
             receivingPage = true;
             
-            // Send start marker to WebSocket
-            Serial.println("  → Sending page_start to WebSocket");
-            ws.textAll("{\"type\":\"page_start\"}");
+            // Send start marker to all clients
+            Serial.println("  → Sending page_start");
+            sendEvent("{\"type\":\"page_start\"}");
           }
           
-          // Append chunk data
+          // Append chunk data (bulk concat - avoid char-by-char reallocation)
           if (receivingPage) {
-            for (int i = 0; i < data.data_len; i++) {
-              currentPage += (char)data.data[i];
-            }
+            char tmpBuf[WEB_MAX_CHUNK_SIZE + 1];
+            memcpy(tmpBuf, data.data, data.data_len);
+            tmpBuf[data.data_len] = '\0';
+            currentPage += tmpBuf;
             receivedChunks++;
             
-            // Send progress to WebSocket
+            // Send progress to all clients
             String progressMsg = "{\"type\":\"progress\",\"received\":" + String(receivedChunks) + ",\"total\":" + String(totalChunksExpected) + "}";
             Serial.printf("  → Progress: %d/%d\n", receivedChunks, totalChunksExpected);
-            ws.textAll(progressMsg);
+            sendEvent(progressMsg);
             
             // Check if complete
             if (receivedChunks >= totalChunksExpected) {
@@ -520,8 +766,11 @@ void handleLoRaPacket() {
               Serial.printf("   Free heap: %d bytes\n", ESP.getFreeHeap());
               
               // Just signal completion - let the app display the stored HTML
-              ws.textAll("{\"type\":\"page_complete\",\"size\":" + String(currentPage.length()) + "}");
+              sendEvent("{\"type\":\"page_complete\",\"size\":" + String(currentPage.length()) + "}");
               
+#ifdef ENABLE_BLE
+              bleAutoSendPage = true;  // Auto-send page data to BLE client
+#endif
               Serial.println("   Page ready for display");
               receivingPage = false;
               requestPending = false;
@@ -547,17 +796,17 @@ void handleLoRaPacket() {
             comp->status = announce.status;
             comp->last_seen = millis();
             
-            // Notify browser
+            // Notify all clients
             String json = "{\"type\":\"companions\",\"companions\":[";
             for (size_t i = 0; i < discoveredCompanions.size(); i++) {
               auto &c = discoveredCompanions[i];
               if (i > 0) json += ",";
               char idStr[16];
               sprintf(idStr, "%02x%02x%02x%02x", c.node_id[0], c.node_id[1], c.node_id[2], c.node_id[3]);
-              json += "{\"name\":\"" + String(c.name) + "\",\"id\":\"" + String(idStr) + "\",\"status\":" + String(c.status) + "}";
+              json += "{\"index\":" + String(i) + ",\"name\":\"" + String(c.name) + "\",\"id\":\"" + String(idStr) + "\",\"status\":" + String(c.status) + "}";
             }
             json += "]}";
-            ws.textAll(json);
+            sendEvent(json);
           }
         }
         break;
@@ -599,9 +848,16 @@ void handleLoRaPacket() {
             chatHistory.erase(chatHistory.begin());
           }
           
-          // Notify browser
-          String json = "{\"type\":\"chat\",\"from\":\"" + senderName + "\",\"msg\":\"" + String(msg.message) + "\",\"self\":false}";
-          ws.textAll(json);
+          // Notify all clients
+          char senderIdStr[16];
+          sprintf(senderIdStr, "%02x%02x%02x%02x", msg.from_id[0], msg.from_id[1], msg.from_id[2], msg.from_id[3]);
+          String json = "{\"type\":\"chat\",\"from\":\"" + senderName + "\",\"from_id\":\"" + String(senderIdStr) + "\",\"msg\":\"" + String(msg.message) + "\",\"self\":false,\"broadcast\":" + String(msg.isBroadcast() ? "true" : "false") + "}";
+          if (!msg.isBroadcast()) {
+            char toIdStr[16];
+            sprintf(toIdStr, "%02x%02x%02x%02x", msg.to_id[0], msg.to_id[1], msg.to_id[2], msg.to_id[3]);
+            json = json.substring(0, json.length() - 1) + ",\"to_id\":\"" + String(toIdStr) + "\"}";
+          }
+          sendEvent(json);
         }
         break;
       }
@@ -613,11 +869,9 @@ void handleLoRaPacket() {
   } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
     Serial.println("⚠ CRC error - corrupted packet");
   }
-  
-  // Return to receive mode
-  radio.startReceive();
 }
 
+#ifndef USB_ONLY
 // WebSocket event handler
 void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, 
                       AwsEventType type, void *arg, uint8_t *data, size_t len) {
@@ -634,8 +888,10 @@ void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
     }
   }
 }
+#endif
 
-// Setup web server
+#ifndef USB_ONLY
+// Setup web server (WiFi mode only)
 void setupWebServer() {
   // Serve HTML with tabs for Nodes, Companions, and Chat
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
@@ -774,8 +1030,9 @@ void setupWebServer() {
   server.begin();
   Serial.println("Web server started");
 }
+#endif  // USB_ONLY
 
-// Process command from either Serial or Bluetooth
+// Process command from either Serial or USB host
 void processCommand(String cmd, Stream* output) {
   cmd.trim();
   cmd.replace("\r", "");
@@ -792,7 +1049,7 @@ void processCommand(String cmd, Stream* output) {
   const char* cmdStr = cmd.c_str();
   
   if (strcmp(cmdStr, "list") == 0) {
-    // Send node list via WebSocket as JSON
+    // Send node list to all clients
     String nodesJson = "{\"type\":\"nodes\",\"nodes\":[";
     for (size_t i = 0; i < discoveredNodes.size(); i++) {
       auto &node = discoveredNodes[i];
@@ -808,8 +1065,8 @@ void processCommand(String cmd, Stream* output) {
       nodesJson += "]}";
     }
     nodesJson += "]}";
-    ws.textAll(nodesJson);
-    output->println("Node list sent to browser");
+    sendEvent(nodesJson);
+    output->println("Node list sent to clients");
     
   } else if (strncmp(cmdStr, "req ", 4) == 0) {
     int firstSpace = cmd.indexOf(' ');
@@ -825,9 +1082,11 @@ void processCommand(String cmd, Stream* output) {
       }
       
       if (nodeIndex >= 0 && nodeIndex < (int)discoveredNodes.size()) {
+        output->printf("Requesting %s from %s (index %d)\n", pagePath.c_str(), discoveredNodes[nodeIndex].name, nodeIndex);
         requestPage(discoveredNodes[nodeIndex].node_id, pagePath.c_str());
+        output->println("LoRa request sent, waiting for response...");
       } else {
-        output->println("ERROR:Invalid node index");
+        output->printf("ERROR:Invalid node index %d (have %d nodes)\n", nodeIndex, discoveredNodes.size());
       }
     } else {
       output->println("ERROR:Usage: req <node_index> <page>");
@@ -861,7 +1120,7 @@ void processCommand(String cmd, Stream* output) {
     }
     
   } else if (strcmp(cmdStr, "companions") == 0) {
-    // Send companion list via WebSocket
+    // Send companion list to all clients
     String json = "{\"type\":\"companions\",\"companions\":[";
     for (size_t i = 0; i < discoveredCompanions.size(); i++) {
       auto &c = discoveredCompanions[i];
@@ -871,8 +1130,62 @@ void processCommand(String cmd, Stream* output) {
       json += "{\"index\":" + String(i) + ",\"name\":\"" + String(c.name) + "\",\"id\":\"" + String(idStr) + "\",\"status\":" + String(c.status) + "}";
     }
     json += "]}";
-    ws.textAll(json);
-    output->println("Companion list sent to browser");
+    sendEvent(json);
+    output->println("Companion list sent to clients");
+    
+  } else if (strcmp(cmdStr, "getpage") == 0) {
+    // Send current page content over serial (base64 encoded, chunked)
+    if (currentPage.length() == 0) {
+      output->println("ERROR:No page loaded");
+    } else {
+      output->println("PAGE_START:");
+      const uint8_t* pageData = (const uint8_t*)currentPage.c_str();
+      size_t pageLen = currentPage.length();
+      size_t chunkSize = 180;  // ~240 base64 chars per line
+      for (size_t offset = 0; offset < pageLen; offset += chunkSize) {
+        size_t remaining = pageLen - offset;
+        size_t thisChunk = (remaining < chunkSize) ? remaining : chunkSize;
+        String encoded = base64_encode(pageData + offset, thisChunk);
+        output->println("PAGE_LINE:" + encoded);
+      }
+      output->println("PAGE_END:");
+      output->printf("Sent %d bytes as base64\n", pageLen);
+    }
+    
+  } else if (strncmp(cmdStr, "meshgo ", 7) == 0) {
+    // Request page by node ID: meshgo <hex_node_id> <page_path>
+    int firstSpace = cmd.indexOf(' ', 7);
+    if (firstSpace > 0) {
+      String nodeIdStr = cmd.substring(7, firstSpace);
+      String pagePath = cmd.substring(firstSpace + 1);
+      
+      // Add leading slash if missing
+      if (pagePath.length() > 0 && pagePath[0] != '/') {
+        pagePath = "/" + pagePath;
+      }
+      
+      nodeIdStr.toLowerCase();
+      bool found = false;
+      for (size_t i = 0; i < discoveredNodes.size(); i++) {
+        char hexbuf[16];
+        sprintf(hexbuf, "%02x%02x%02x%02x",
+                discoveredNodes[i].node_id[0],
+                discoveredNodes[i].node_id[1],
+                discoveredNodes[i].node_id[2],
+                discoveredNodes[i].node_id[3]);
+        if (nodeIdStr == String(hexbuf)) {
+          requestPage(discoveredNodes[i].node_id, pagePath.c_str());
+          output->printf("Requesting %s from %s\n", pagePath.c_str(), discoveredNodes[i].name);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        output->println("ERROR:Node not found: " + nodeIdStr);
+      }
+    } else {
+      output->println("ERROR:Usage: meshgo <node_id> <page>");
+    }
     
   } else if (strcmp(cmdStr, "help") == 0) {
     output->println("HELP:list - Show discovered nodes");
@@ -880,6 +1193,8 @@ void processCommand(String cmd, Stream* output) {
     output->println("HELP:companions - Show discovered companions");
     output->println("HELP:msg <text> - Broadcast message to all companions");
     output->println("HELP:dm <index> <text> - Direct message to companion");
+    output->println("HELP:getpage - Get loaded page content (base64)");
+    output->println("HELP:meshgo <node_id> <page> - Request page by node ID");
     
   } else if (cmd.length() > 0) {
     output->println("ERROR:Unknown command. Type 'help' for commands.");
@@ -892,14 +1207,21 @@ void setup() {
   
   Serial.println("\n\n");
   Serial.println("╔═══════════════════════════════════════════════╗");
+#ifdef USB_ONLY
+  Serial.println("║   MeshWeb Companion - USB Only Mode          ║");
+#elif defined(BLE_ONLY)
+  Serial.println("║   MeshWeb Companion - BLE Mode               ║");
+#else
   Serial.println("║   MeshWeb Companion - ESP32 Xiao             ║");
+#endif
   Serial.println("║   Decentralized Web Over LoRa                ║");
   Serial.println("╚═══════════════════════════════════════════════╝");
   
-  // Generate node ID from MAC address (persistent across reboots)
+  // Generate node ID from chip eFuse MAC (works with or without WiFi)
+  uint64_t efuse = ESP.getEfuseMac();
   uint8_t mac[6];
-  WiFi.macAddress(mac);
-  // Use last 4 bytes of MAC as node ID
+  memcpy(mac, &efuse, 6);
+  // Use last 4 bytes as node ID
   node_id[0] = mac[2];
   node_id[1] = mac[3];
   node_id[2] = mac[4];
@@ -920,6 +1242,7 @@ void setup() {
   Serial.printf("(Derived from MAC: %02X:%02X:%02X:%02X:%02X:%02X)\n",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   
+#ifndef USB_ONLY
   // Initialize WiFi AP with unique name
   WiFi.mode(WIFI_AP);
   String apName = String(WIFI_SSID) + " - " + String(companionName);
@@ -928,22 +1251,35 @@ void setup() {
   Serial.print("WiFi AP IP: ");
   Serial.println(IP);
   Serial.printf("WiFi AP '%s' started\n", apName.c_str());
+#else
+  Serial.println("WiFi disabled (USB_ONLY mode)");
+#endif
   
   // Initialize LoRa
   setupLoRa();
   
+#ifndef USB_ONLY
   // Setup web server
   setupWebServer();
+#endif
+  
+#ifdef ENABLE_BLE
+  setupBLE();
+#endif
   
   if (loraReady) {
     Serial.println("\n✓ Setup complete - listening for web nodes...");
+#ifndef USB_ONLY
     Serial.printf("Browse to: http://%s\n", WiFi.softAPIP().toString().c_str());
+#endif
     Serial.println("\nSerial Commands:");
     Serial.println("  'list' - Show discovered nodes");
     Serial.println("  'req <index> <page>' - Request a page");
     Serial.println("  'companions' - Show discovered companions");
     Serial.println("  'msg <text>' - Broadcast message");
-    Serial.println("  'dm <index> <text>' - Direct message\n");
+    Serial.println("  'dm <index> <text>' - Direct message");
+    Serial.println("  'getpage' - Get loaded page (base64)");
+    Serial.println("  'meshgo <node_id> <page>' - Request by node ID\n");
     
     // Send initial companion announce
     delay(1000);
@@ -971,14 +1307,62 @@ void loop() {
     processCommand(cmd, &Serial);
   }
   
+#ifndef USB_ONLY
   // Clean up WebSocket clients
   ws.cleanupClients();
+#endif
   
-  // Periodic companion announce
-  if (loraReady && (millis() - lastCompanionAnnounce > COMPANION_ANNOUNCE_INTERVAL)) {
+  // Periodic companion announce (suppress during page transfer to avoid collisions)
+  if (loraReady && !receivingPage && (millis() - lastCompanionAnnounce > COMPANION_ANNOUNCE_INTERVAL)) {
     sendCompanionAnnounce();
     lastCompanionAnnounce = millis();
   }
+  
+  // Detect stalled page transfer (chunk lost due to collision)
+  if (receivingPage && lastChunkTime > 0 && (millis() - lastChunkTime > 3000)) {
+    Serial.printf("⚠ Page transfer stalled at %d/%d chunks\n", receivedChunks, totalChunksExpected);
+    Serial.printf("   Delivering partial page (%d bytes)\n", currentPage.length());
+    
+    // Deliver what we have
+    sendEvent("{\"type\":\"page_complete\",\"size\":" + String(currentPage.length()) + "}");
+    
+#ifdef ENABLE_BLE
+    bleAutoSendPage = true;
+#endif
+    receivingPage = false;
+    requestPending = false;
+    currentRequestId = 0;
+    lastChunkTime = 0;
+  }
+  
+#ifdef ENABLE_BLE
+  // Process queued BLE commands (outside NimBLE callback for reliable notifications)
+  if (pendingBLECommand.length() > 0) {
+    String cmd = pendingBLECommand;
+    pendingBLECommand = "";
+    processCommand(cmd, &bleOutputStream);
+  }
+  
+  // Auto-send page data over BLE after page_complete
+  if (bleAutoSendPage) {
+    bleAutoSendPage = false;
+    if (bleClientConnected && currentPage.length() > 0) {
+      Serial.println("[BLE] Auto-sending page data...");
+      bleOutputStream.println("PAGE_START:");
+      const uint8_t* pageData = (const uint8_t*)currentPage.c_str();
+      size_t pageLen = currentPage.length();
+      size_t chunkSize = 180;
+      for (size_t offset = 0; offset < pageLen; offset += chunkSize) {
+        size_t remaining = pageLen - offset;
+        size_t thisChunk = (remaining < chunkSize) ? remaining : chunkSize;
+        String encoded = base64_encode(pageData + offset, thisChunk);
+        bleOutputStream.println("PAGE_LINE:" + encoded);
+      }
+      bleOutputStream.println("PAGE_END:");
+      Serial.printf("[BLE] Auto-sent %d bytes as base64\n", pageLen);
+    }
+  }
+#endif
   
   delay(10);
 }

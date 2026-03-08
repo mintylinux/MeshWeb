@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshWeb Companion</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#111;color:#fff;padding:10px}
+h2{margin:10px 0}
+.tabs{display:flex;gap:5px;margin:10px 0}
+.tab{background:#333;border:none;padding:10px 20px;color:#fff;cursor:pointer;border-radius:5px 5px 0 0}
+.tab.active{background:#07f}
+.panel{display:none;background:#222;padding:15px;border-radius:0 5px 5px 5px;min-height:200px}
+.panel.active{display:block}
+button{background:#07f;border:none;padding:8px 12px;color:#fff;cursor:pointer;border-radius:4px;margin:2px}
+button:hover{background:#05d}
+.node,.comp{margin:10px 0;padding:10px;background:#333;border-radius:5px}
+.nid{color:#888;font-size:11px;font-family:monospace}
+#chat{height:200px;overflow-y:auto;background:#1a1a1a;padding:10px;border-radius:5px;margin-bottom:10px}
+.msg{margin:5px 0;padding:5px;border-radius:3px}
+.msg.self{background:#07f;text-align:right}
+.msg.other{background:#333}
+.msg-from{font-size:11px;color:#888}
+#msgInput{width:70%;padding:8px;border:none;border-radius:4px;background:#333;color:#fff}
+#status{background:#1a1a1a;padding:10px;border-radius:5px;margin:10px 0}
+.conn{font-size:12px;color:#4a4;margin-left:10px}
+</style>
+</head>
+<body>
+<h2>📡 MeshWeb Companion <span class="conn" id="conn">●</span></h2>
+<div class="tabs">
+  <button class="tab active" onclick="showTab(0)">Nodes</button>
+  <button class="tab" onclick="showTab(1)">Companions</button>
+  <button class="tab" onclick="showTab(2)">Chat</button>
+</div>
+<div id="p0" class="panel active"><div id="nodes">Waiting for data...</div></div>
+<div id="p1" class="panel"><div id="comps">No companions discovered yet</div></div>
+<div id="p2" class="panel">
+  <div id="chat"></div>
+  <input id="msgInput" placeholder="Type message...">
+  <button onclick="sendMsg()">Send</button>
+</div>
+<div id="status"></div>
+
+<script>
+var ws;
+var reconnectTimer;
+
+function connect() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+
+  ws.onopen = function() {
+    document.getElementById('conn').style.color = '#4a4';
+    document.getElementById('conn').title = 'Connected';
+    ws.send('list');
+    ws.send('companions');
+  };
+
+  ws.onclose = function() {
+    document.getElementById('conn').style.color = '#a44';
+    document.getElementById('conn').title = 'Disconnected';
+    // Auto-reconnect
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 3000);
+  };
+
+  ws.onmessage = function(e) {
+    try {
+      var d = JSON.parse(e.data);
+
+      if (d.type == 'nodes') {
+        var h = '';
+        for (var i = 0; i < d.nodes.length; i++) {
+          var n = d.nodes[i];
+          h += '<div class=node><b>' + n.name + '</b> <span class=nid>ID: ' + n.id + '</span><br>';
+          for (var j = 0; j < n.pages.length; j++) {
+            h += '<button onclick="ws.send(\'req ' + n.index + ' ' + n.pages[j] + '\')">' + n.pages[j] + '</button>';
+          }
+          h += '</div>';
+        }
+        document.getElementById('nodes').innerHTML = h || 'No nodes discovered';
+      }
+
+      else if (d.type == 'companions') {
+        var h = '';
+        for (var i = 0; i < d.companions.length; i++) {
+          var c = d.companions[i];
+          h += '<div class=comp><b>' + c.name + '</b> <span class=nid>ID: ' + c.id + '</span></div>';
+        }
+        document.getElementById('comps').innerHTML = h || 'No companions';
+      }
+
+      else if (d.type == 'chat') {
+        var c = document.getElementById('chat');
+        c.innerHTML += '<div class="msg ' + (d.self ? 'self' : 'other') + '"><span class=msg-from>' + d.from + '</span><br>' + d.msg + '</div>';
+        c.scrollTop = c.scrollHeight;
+      }
+
+      else if (d.type == 'progress') {
+        document.getElementById('status').innerHTML = 'Downloading: ' + d.received + '/' + d.total;
+      }
+
+      else if (d.type == 'page_complete') {
+        document.getElementById('status').innerHTML = '<a href="/page" style="color:#07f">View Page</a> (' + d.size + ' bytes)';
+      }
+    } catch(e) {}
+  };
+}
+
+function showTab(n) {
+  document.querySelectorAll('.tab').forEach(function(t, i) {
+    t.className = i == n ? 'tab active' : 'tab';
+  });
+  document.querySelectorAll('.panel').forEach(function(p, i) {
+    p.className = i == n ? 'panel active' : 'panel';
+  });
+}
+
+function sendMsg() {
+  var m = document.getElementById('msgInput').value;
+  if (m) {
+    ws.send('msg ' + m);
+    document.getElementById('msgInput').value = '';
+  }
+}
+
+document.getElementById('msgInput').onkeypress = function(e) {
+  if (e.key == 'Enter') sendMsg();
+};
+
+connect();
+</script>
+</body>
+</html>

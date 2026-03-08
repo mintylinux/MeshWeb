@@ -1,4 +1,4 @@
-package com.example.meshcore_search_browser
+package com.mintylinux.meshweb
 
 import io.flutter.embedding.android.FlutterActivity
 
