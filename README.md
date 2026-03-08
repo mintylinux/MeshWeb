@@ -15,16 +15,17 @@ Perfect for off-grid communication, disaster scenarios, or building local commun
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/screenshot1.jpg" width="200" alt="Node Discovery">
-  <img src="screenshots/screenshot2.jpg" width="200" alt="Companion Discovery">
-  <img src="screenshots/screenshot3.jpg" width="200" alt="Chat">
+  <img src="screenshots/home.jpeg" width="200" alt="Home Screen">
+  <img src="screenshots/downloading.jpeg" width="200" alt="Page Download">
+  <img src="screenshots/page-viewer.jpeg" width="200" alt="Page Viewer">
 </p>
 <p align="center">
-  <img src="screenshots/screenshot4.jpg" width="200" alt="Hosted Page">
-  <img src="screenshots/screenshot5.jpg" width="200" alt="Page Downloaded">
+  <img src="screenshots/chat.jpeg" width="200" alt="Public Chat">
+  <img src="screenshots/dm.jpeg" width="200" alt="Direct Message">
+  <img src="screenshots/chat-keyboard.jpeg" width="200" alt="Chat Input">
 </p>
 
-*Left to right: Node discovery, Companion discovery, Chat between companions, Hosted web page, Page download complete*
+*Top: Home screen, page download with progress & stop button, viewing a hosted page. Bottom: Public broadcast chat, DM with companion, chat input.*
 
 ## Architecture
 
@@ -62,13 +63,22 @@ ESP32 + LoRa device that:
 ESP32 + LoRa device that:
 - Discovers host nodes on the mesh
 - Requests and displays web pages
-- Creates WiFi AP for phone/laptop to connect
-- Supports companion-to-companion messaging
+- Connects to the Android app via BLE (Nordic UART Service)
+- Creates WiFi AP for direct browser access
+- Supports broadcast and direct companion-to-companion messaging
 
 **Supported boards:** Seeed XIAO ESP32-S3 + Wio-SX1262, Heltec WiFi LoRa 32 V3
 
 ### `/android` - Android App
-Flutter-based mobile browser for MeshWeb (connects via WiFi to companion).
+Flutter-based mobile app that connects to companions over BLE:
+- Scan and connect to nearby MeshWeb companions
+- Browse pages with download progress and cancel support
+- Public broadcast chat channel
+- Direct messaging between companions
+- Also supports WiFi AP connection via WebView
+
+### `/pi-host` - Pi Host Daemon
+Flask-based web UI for USB-connected companions on Raspberry Pi or laptop.
 
 ## Quick Start
 
@@ -89,6 +99,15 @@ pio run -e heltec_v3 -t upload
 ```
 
 ### 3. Connect and Browse
+
+**Via Android App (BLE):**
+1. Install the MeshWeb APK on your Android device
+2. Open the app and tap "Connect via Bluetooth"
+3. Scan for and connect to your companion
+4. Tap "Browse" on discovered nodes to view pages
+5. Use the Chat tab for broadcast or direct messaging
+
+**Via WiFi:**
 1. Connect your phone/laptop to the companion's WiFi AP
    - SSID: `MeshWeb-Browser - <name>`
    - Password: `meshweb123`
@@ -134,10 +153,12 @@ The node ID is shown in the companion's web interface.
 ## Features
 
 - ✅ Automatic node discovery
-- ✅ Progress bar during page downloads
+- ✅ BLE connectivity (Android app ↔ companion)
+- ✅ Progress bar during page downloads with cancel support
 - ✅ Inter-node linking with `mesh://` protocol
 - ✅ File upload/delete on host nodes
-- ✅ Companion-to-companion chat
+- ✅ Broadcast and direct companion-to-companion chat
+- ✅ Unread message badges
 - ✅ Multiple companion support with request filtering
 
 ## License
