@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon.jpg" width="120" alt="MeshWeb Logo">
+</p>
+
 # MeshWeb
 
 **Decentralized Web Over LoRa** - A mesh network for hosting and browsing web pages without internet connectivity.
